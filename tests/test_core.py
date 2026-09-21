@@ -1,6 +1,6 @@
 import unittest
 from unittest.mock import Mock, patch
-from core import allowed_url, SafeRedirect, Decision, gate, fetch_page, candidates, check_claim, error_diagnostic, ResponseFailure, normalize_domain, open_public_page
+from core import allowed_url, SafeRedirect, Decision, gate, fetch_page, candidates, check_claim, error_diagnostic, ResponseFailure, normalize_domain, open_public_page, judgement_prompt
 
 
 class EvidenceSafetyTests(unittest.TestCase):
@@ -164,6 +164,26 @@ class EvidenceSafetyTests(unittest.TestCase):
                 with open_public_page('https://public.example.com', [], True):
                     pass
             conn.close.assert_called_once()
+
+    def test_judgement_modes_reach_model_and_keep_quote_gate(self):
+        client = Mock()
+        client.responses.create.return_value.model_dump.return_value = {'output': [
+            {'type': 'web_search_call', 'action': {'sources': [{'url': 'https://law.go.kr/a'}]}}]}
+        client.responses.parse.return_value.model_dump.return_value = {'status': 'completed'}
+        client.responses.parse.return_value.output_parsed = Decision(**self.data)
+        for mode in ['균형', '엄격']:
+            with patch('core.fetch_page', return_value=(self.pages[0].copy(), None)):
+                result = check_claim(client, '경제정책 주장', '2025-01-01', judgement_mode=mode)
+            self.assertEqual(result['verdict'], '참')
+            self.assertEqual(result['judgement_mode'], mode)
+            self.assertEqual(client.responses.parse.call_args.kwargs['input'][0]['content'], judgement_prompt(mode))
+        self.data['evidence'][0]['quote'] = '본문에 존재하지 않는 허위 인용문을 임의로 생성했다.'
+        client.responses.parse.return_value.output_parsed = Decision(**self.data)
+        with patch('core.fetch_page', return_value=(self.pages[0].copy(), None)):
+            result = check_claim(client, '경제정책 주장', '2025-01-01', judgement_mode='균형')
+        self.assertEqual(result['verdict'], '불확실')
+        self.assertEqual(result['decision_origin'], '시스템 검증')
+        self.assertTrue(result['hold_reasons'])
 
 
 if __name__ == '__main__':

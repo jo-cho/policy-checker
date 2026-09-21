@@ -202,6 +202,37 @@ confidence는 선택한 판정에 대한 0~100 자기평가이며 정답 확률�
 불확실 판정에 대한 높은 신뢰도도 가능하다. 확인하지 못한 부분을 limitations에 적는다.'''
 
 
+BALANCED_PROMPT = JUDGE_PROMPT.replace(
+    '참: 주장의 모든 핵심 조건을 직접 입증. 거짓: 핵심 명제를 직접 반박.\n'
+    '검색되지 않음은 거짓의 증거가 아니다. 예측, 가치판단, 인과효과의 단정,\n'
+    '복합 주장의 일부만 검증, 시행일·대상·금액·예외 불명확, 출처 충돌은 불확실.',
+    '참: 주장의 핵심 사실과 결론을 바꾸는 조건이 직접 근거로 입증된다. 거짓: 핵심 명제가 직접 반박된다.\n'
+    '믿을 수 있고 직접적인 1차 자료 하나도 충분할 수 있다. 출처 수가 적다는 이유만으로 보류하지 마라.\n'
+    '모든/항상/누구나 같은 전칭 주장에는 해당 범위 안의 명백한 반례 하나로 거짓 판정이 가능하다.\n'
+    'A와 B를 모두 주장하는 문장에서 A가 명백히 거짓이면 B가 미확인이어도 전체는 거짓일 수 있다.\n'
+    '핵심 조건이 미확인인 경우에는 참으로 판정하지 말고, 비본질적인 누락만 limitations에 분리한다.\n'
+    '자료 간 차이가 기준연도·대상·수정 공고로 해소되면 그 이유를 설명하고 conflict=false로 둔다.\n'
+    '핵심 결론을 바꾸는 충돌이 해소되지 않으면 conflict=true, 불확실이다.\n'
+    '검색되지 않음은 거짓의 증거가 아니다. 순수 가치판단이나 검증 불가능한 미래 예측은 불확실이다.\n'
+    '인과 주장도 직접적이고 적절한 연구 근거가 있으면 평가할 수 있다. 상관관계만으로 인과를 단정하지 마라.'
+).replace(
+    '법적 권리·의무 판단은 관련 법령 본문이 필요하다. 법령 시행일과 개정 여부를\n'
+    '확인할 수 없으면 time_verified=false로 설정한다. 현재 페이지를 과거 법으로 간주하지 않는다.',
+    '법적 권리·의무의 해석과 적용 판단에는 관련 법령 본문이 필요하다. 정책 발표 여부는 발표 원문으로 검증 가능하다.\n'
+    'time_verified는 시간 조건이 이번 핵심 판정에 충분한지를 뜻한다.\n'
+    '시점에 따라 결론이 바뀌지 않는 정의·명시된 과거 사건에서 문서 게시일 누락만으로 보류하지 마라.\n'
+    '이때 시간 조건이 불필요한 이유를 설명하고 time_verified=true로 둔다.\n'
+    '현행 자격·세율·급여액처럼 기준일이 결론을 바꾸는 주장에는 적용 시점 근거가 반드시 필요하다.\n'
+    '그 근거가 없으면 time_verified=false, 불확실이다. 현재 페이지를 과거 법으로 간주하지 않는다.'
+) + '\n균형 판정 모드다. 참·거짓 비율을 목표로 삼거나 점수를 임의로 높이지 마라. 근거의 충분성에 따라 판정한다.'
+
+
+def judgement_prompt(mode):
+    if mode not in ('균형', '엄격'):
+        raise ValueError('알 수 없는 판정 모드')
+    return BALANCED_PROMPT if mode == '균형' else JUDGE_PROMPT
+
+
 def gate(decision, pages):
     # 잘못된 인용문이 하나라도 있으면 설명과 신뢰도를 재사용하지 않습니다.
     indexed = {p['id']: p for p in pages}
@@ -214,15 +245,26 @@ def gate(decision, pages):
         else:
             valid.append(e.model_dump())
     direction = {'참': '지지', '거짓': '반박'}.get(decision.verdict)
-    failed = invalid or (decision.verdict != '불확실' and (
-        not decision.sufficient or not decision.time_verified or decision.conflict
-        or not any(e['relationship'] == direction for e in valid)))
-    if failed:
+    reasons = []
+    if invalid:
+        reasons.append('인용문 또는 출처 ID가 원문과 일치하지 않음')
+    if decision.verdict != '불확실':
+        if not decision.sufficient:
+            reasons.append('핵심 주장을 입증·반박할 근거가 충분하지 않음')
+        if not decision.time_verified:
+            reasons.append('판정에 필요한 적용 시점이 확인되지 않음')
+        if decision.conflict:
+            reasons.append('결론에 영향을 주는 근거 충돌이 해소되지 않음')
+        if not any(e['relationship'] == direction for e in valid):
+            reasons.append('판정 방향과 일치하는 직접 인용 근거가 없음')
+    if reasons:
         return {'verdict': '불확실', 'confidence': None,
-                'explanation': '인용문·근거의 충분성·적용 시점 검증을 통과하지 못해 확정 판정을 보류했습니다.',
+                'explanation': '확정 판정을 보류한 이유: ' + '; '.join(reasons),
                 'scope': decision.scope, 'evidence': [],
+                'decision_origin': '시스템 검증', 'hold_reasons': reasons,
                 'limitations': ['시스템 검증으로 판정을 변경했으므로 LLM 신뢰도를 표시하지 않습니다.']}
-    return {**decision.model_dump(), 'evidence': valid}
+    return {**decision.model_dump(), 'evidence': valid, 'decision_origin': 'LLM 판정',
+            'hold_reasons': decision.limitations if decision.verdict == '불확실' else []}
 
 
 def candidates(response, domains=None, all_web=False):
@@ -292,7 +334,8 @@ def error_diagnostic(exc, stage):
     return messages.get(name, '아래 오류 진단을 확인해 주세요. 이 정보로 실패 지점을 확인할 수 있습니다.'), detail
 
 
-def check_claim(client, claim, as_of, model='gpt-4.1', on_progress=None, domains=None, all_web=False):
+def check_claim(client, claim, as_of, model='gpt-4.1', on_progress=None, domains=None, all_web=False, judgement_mode='균형'):
+    prompt = judgement_prompt(judgement_mode)
     selected = [] if all_web else list(dict.fromkeys(normalize_domain(d) for d in (DOMAINS if domains is None else domains)))
     if not all_web and not 1 <= len(selected) <= 100:
         raise ValueError('허용 출처는 1개 이상 100개 이하로 선택해 주세요.')
@@ -330,13 +373,14 @@ def check_claim(client, claim, as_of, model='gpt-4.1', on_progress=None, domains
     if not pages:
         result = {'verdict': '불확실', 'confidence': None,
                   'explanation': '선택한 검색 범위에서 판정 가능한 본문을 확보하지 못했습니다.',
-                  'scope': claim, 'evidence': [],
+                  'scope': claim, 'evidence': [], 'decision_origin': '본문 확보 실패',
+                  'hold_reasons': ['판정에 사용할 본문을 확보하지 못함'],
                   'limitations': ['검색 누락 또는 본문 수집 실패는 주장이 거짓이라는 의미가 아닙니다.']}
     else:
         progress('LLM 판정 및 응답 해석')
         response = client.responses.parse(
             model=model, store=False, max_output_tokens=4500,
-            input=[{'role': 'system', 'content': JUDGE_PROMPT},
+            input=[{'role': 'system', 'content': prompt},
                    {'role': 'user', 'content': json.dumps(
                        {'claim': claim, 'as_of': as_of, 'pages': pages}, ensure_ascii=False)}],
             text_format=Decision)
@@ -349,4 +393,5 @@ def check_claim(client, claim, as_of, model='gpt-4.1', on_progress=None, domains
             'checked_at': datetime.now(timezone.utc).isoformat(), 'allowed_domains': selected,
             'sources': [{k: v for k, v in p.items() if k != 'text'} for p in pages],
             'collection_failures': failures, 'search_scope': '전체 웹' if all_web else '선택한 출처',
-            'web_search_calls': search_calls}
+            'web_search_calls': search_calls, 'judgement_mode': judgement_mode,
+            'candidate_count': len(urls), 'collected_count': len(pages)}

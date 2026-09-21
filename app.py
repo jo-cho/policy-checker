@@ -71,6 +71,9 @@ if 'active_domains' not in st.session_state:
     st.session_state.domain_options = list(DOMAINS)
 
 with st.sidebar:
+    judgement_mode = st.radio('판정 방식', ['균형', '엄격'], key='judgement_mode',
+                              on_change=sources_changed, horizontal=True)
+    st.caption('균형: 핵심 사실에 충분한 직접 근거가 있으면 판정합니다. 엄격: 모든 핵심 조건과 적용 시점을 보수적으로 확인합니다.')
     st.subheader('검색 범위')
     all_web = st.toggle('전체 웹 검색', key='all_web', on_change=sources_changed)
     st.caption('기본값은 정부·법령 목록입니다. 전체 웹 검색을 켜면 아래 목록 제한을 적용하지 않습니다.')
@@ -129,7 +132,7 @@ if submitted:
                 with OpenAI(api_key=key, timeout=90, max_retries=1) as client:
                     st.session_state.result = check_claim(
                         client, claim.strip(), as_of.isoformat(), setting('OPENAI_MODEL', 'gpt-4.1'),
-                        on_progress=show_progress, domains=selected_domains, all_web=all_web)
+                        on_progress=show_progress, domains=selected_domains, all_web=all_web, judgement_mode=judgement_mode)
         except Exception as exc:
             message, detail = error_diagnostic(exc, stage[0])
             st.error(message)
@@ -147,6 +150,10 @@ if 'result' in st.session_state:
     b.metric('LLM 판정 신뢰도', f"{r['confidence']}%" if r['confidence'] is not None else '산출 안 함')
     st.caption('선택된 판정에 대한 자기평가이며, 주장이 참일 확률이 아닙니다.')
     st.text(r['explanation'])
+    st.caption(f"판정 방식: {r.get('judgement_mode', '균형')} · 판정 경로: {r.get('decision_origin', 'LLM 판정')}")
+    if r['verdict'] == '불확실':
+        st.info(f"검색 후보 {r.get('candidate_count', 0)}개 중 본문 확보 {r.get('collected_count', 0)}개. "
+                '본문 확보 실패인지, 근거 내용이 부족한지 아래 설명과 수집 내역을 확인해 주세요.')
     st.caption('판정 범위: ' + r['scope'])
     st.caption(f"기준일 {r['as_of']} · 확인 시각 {r['checked_at']} · 모델 {r['model']}")
     sources = {s['id']: s for s in r['sources']}
