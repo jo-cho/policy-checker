@@ -1,0 +1,105 @@
+import hmac
+import json
+import os
+import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
+import streamlit as st
+from openai import OpenAI, AuthenticationError, RateLimitError, APIError
+from core import check_claim, DOMAINS
+
+st.set_page_config(page_title='정책 팩트체크', page_icon='🔎', layout='centered')
+
+
+def setting(name, default=''):
+    try:
+        return st.secrets.get(name, os.getenv(name, default))
+    except FileNotFoundError:
+        return os.getenv(name, default)
+
+
+st.caption('POLICY FACT CHECK · 대한민국 공식 출처')
+st.title('경제정책, 근거로 확인하세요')
+st.write('주장을 입력하면 정부·법령 원문을 찾아 참, 거짓, 불확실로 판정합니다.')
+with st.sidebar:
+    st.subheader('판정 기준')
+    st.write('🟢 참: 증거로 입증됨\n\n🔴 거짓: 증거로 반박됨\n\n🟡 불확실: 충분한 증거 없음')
+    st.caption('신뢰도는 LLM의 자기평가입니다. 통계적으로 검증된 정답 확률이 아닙니다.')
+    with st.expander('허용 출처 목록'):
+        st.text('\n'.join(DOMAINS))
+    st.caption('열람 가능한 공식 HTML·텍스트 본문만 판정에 사용합니다.')
+
+password = setting('APP_PASSWORD')
+if password:
+    entered = st.text_input('이용 비밀번호', type='password')
+    if not hmac.compare_digest(entered.encode(), password.encode()):
+        st.info('비밀번호를 입력하면 사용할 수 있습니다.')
+        st.stop()
+
+with st.form('claim_form'):
+    claim = st.text_area('검증할 주장', max_chars=1500, height=130,
+                         placeholder='정책명, 적용 연도, 대상, 금액을 포함해 한 가지 주장으로 입력하세요.')
+    as_of = st.date_input('판정 기준일', value=datetime.now(ZoneInfo('Asia/Seoul')).date())
+    st.caption('입력한 주장과 수집한 공식 문서가 OpenAI API로 전송됩니다.')
+    submitted = st.form_submit_button('공식 근거로 검증하기', type='primary')
+
+if submitted:
+    st.session_state.pop('result', None)
+    key = setting('OPENAI_API_KEY')
+    if len(claim.strip()) < 10:
+        st.warning('10자 이상의 구체적인 주장을 입력해 주세요.')
+    elif not key:
+        st.error('운영자가 OPENAI_API_KEY를 설정해야 합니다. README의 배포 안내를 확인하세요.')
+    elif time.time() - st.session_state.get('last_request', 0) < 30:
+        st.warning('연속 요청은 30초 간격으로 가능합니다.')
+    else:
+        st.session_state.last_request = time.time()
+        try:
+            with st.spinner('공식 근거 검색 → 원문 확인 → 판정 중입니다…'):
+                with OpenAI(api_key=key, timeout=90, max_retries=1) as client:
+                    st.session_state.result = check_claim(
+                        client, claim.strip(), as_of.isoformat(), setting('OPENAI_MODEL', 'gpt-4.1'))
+        except AuthenticationError:
+            st.error('API 인증에 실패했습니다. 운영자가 키를 확인해 주세요.')
+        except RateLimitError:
+            st.error('API 사용 한도 또는 요청 제한에 도달했습니다. 잠시 후 다시 시도하세요.')
+        except (APIError, ValueError):
+            st.error('검색 또는 판정 요청을 완료하지 못했습니다. 다시 시도해 주세요. 사실 판정은 생성하지 않았습니다.')
+        except Exception:
+            st.error('처리 중 오류가 발생했습니다. 설정을 확인한 뒤 다시 시도해 주세요.')
+
+if 'result' in st.session_state:
+    r = st.session_state.result
+    st.divider()
+    st.text('검증한 주장: ' + r['claim'])
+    a, b = st.columns(2)
+    a.metric('판정', r['verdict'])
+    b.metric('LLM 판정 신뢰도', f"{r['confidence']}%" if r['confidence'] is not None else '산출 안 함')
+    st.caption('선택된 판정에 대한 자기평가이며, 주장이 참일 확률이 아닙니다.')
+    st.text(r['explanation'])
+    st.caption('판정 범위: ' + r['scope'])
+    st.caption(f"기준일 {r['as_of']} · 확인 시각 {r['checked_at']} · 모델 {r['model']}")
+    sources = {s['id']: s for s in r['sources']}
+    st.subheader('판정에 사용한 근거')
+    if not r['evidence']:
+        st.info('확정 판정에 사용할 검증된 인용 근거가 없습니다.')
+    for e in r['evidence']:
+        s = sources[e['source_id']]
+        with st.container(border=True):
+            st.text(f"[{s['id']}] {s['title']} · {e['relationship']}")
+            st.text('“' + e['quote'] + '”')
+            st.text(e['explanation'])
+            st.caption(f"발행일: {e['publication_date']} · 적용 시점: {e['applicable_period']}")
+            st.link_button('공식 원문 열기', s['url'])
+    if r['limitations']:
+        st.subheader('확인되지 않은 부분')
+        for item in r['limitations']:
+            st.text('• ' + item)
+    with st.expander('수집 내역'):
+        st.caption('수집 성공은 해당 문서를 판정 근거로 채택했다는 의미가 아닙니다.')
+        for s in r['sources']:
+            st.link_button(f"[{s['id']}] {s['title']}", s['url'])
+        for failure in r['collection_failures']:
+            st.text(f"{failure['url']} — {failure['reason']}")
+    st.download_button('결과 JSON 내려받기', json.dumps(r, ensure_ascii=False, indent=2),
+                       file_name='policy-check.json', mime='application/json')

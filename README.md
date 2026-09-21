@@ -1,0 +1,102 @@
+# 경제정책 팩트체크
+
+한국어 Streamlit 앱입니다. 주장과 판정 기준일을 입력하면 허용된 정부·법령 사이트를 검색하고 원문을 수집한 뒤 **참 / 거짓 / 불확실**로 판정합니다. 설명, 검증한 인용문, 원문 링크, LLM 판정 신뢰도(%)와 JSON 다운로드를 제공합니다.
+
+## 먼저 알아둘 점
+
+- **GitHub는 코드 저장소이고, 실행 서버는 Streamlit Community Cloud입니다.** Python 앱은 GitHub Pages에서 실행할 수 없습니다.
+- OpenAI API 키와 API 이용 요금이 필요합니다. ChatGPT 구독과 별개입니다. 키를 채팅이나 GitHub에 공개하지 마세요.
+- 신뢰도는 선택한 판정에 대한 모델 자기평가이며, 검증된 정확도나 주장이 참일 확률이 아닙니다. 예를 들어 '불확실 90%'는 불확실하다는 판정에 대한 신뢰도입니다.
+- 원문 확보 실패 또는 시스템이 판정을 보류한 경우 신뢰도는 **산출 안 함**으로 표시합니다. 임의의 백분율을 만들지 않습니다.
+
+## GitHub → 임시 웹페이지 배포
+
+1. 이 압축파일을 풀고 GitHub에서 새 저장소를 만듭니다.
+2. `policy-checker` 폴더 **안의 파일과 폴더**를 저장소 루트에 올립니다. 루트에 `app.py`, `core.py`, `requirements.txt`, `README.md`, `tests/`, `.streamlit/`, `.gitignore`가 있어야 합니다. 숨김 파일도 포함하세요.
+3. https://share.streamlit.io 에 로그인하고 GitHub 계정을 연결합니다.
+4. `Create app`에서 저장소와 브랜치(보통 `main`)를 선택하고 진입 파일을 `app.py`로 지정합니다. Python은 3.12를 선택합니다.
+5. `Advanced settings`의 `Secrets`에 다음을 입력합니다.
+
+```toml
+OPENAI_API_KEY = "실제_OpenAI_API_키"
+OPENAI_MODEL = "gpt-4.1"
+APP_PASSWORD = "직접_정한_공유용_비밀번호"
+```
+
+6. `Deploy`를 누르고 생성된 앱 주소에 접속합니다. 비밀번호를 입력하고 구체적인 주장을 검증합니다.
+7. 수정한 코드를 GitHub에 반영하면 연결된 앱에 배포됩니다. 운영 중 실제 근거 링크와 본문을 직접 점검하세요.
+
+`secrets.toml.example`은 예시일 뿐 자동으로 읽히지 않습니다. 실제 키가 들어 있는 `secrets.toml`은 업로드하지 마세요. 앱 운영용 API 키에 비용 한도를 설정하고 임시 공유에는 비밀번호를 사용하세요. 세션별 30초 제한은 새 세션을 막는 전체 서비스 사용량 제한은 아닙니다.
+
+## 로컬 실행
+
+Python 3.12 환경에서:
+
+```bash
+python -m venv .venv
+```
+
+macOS/Linux:
+
+```bash
+source .venv/bin/activate
+```
+
+Windows PowerShell:
+
+```powershell
+.venv\Scripts\Activate.ps1
+```
+
+이후:
+
+```bash
+pip install -r requirements.txt
+```
+
+`.streamlit/secrets.toml.example`을 `.streamlit/secrets.toml`로 복사해 실제 값을 넣고 실행합니다.
+
+```bash
+streamlit run app.py
+```
+
+## 동작 및 엄격성
+
+1. OpenAI Responses API `web_search`의 `allowed_domains`로 검색 범위를 제한합니다.
+2. 검색 도구가 반환한 출처 메타데이터에서만 URL을 취합니다. 모델이 본문에 만들어 낸 링크는 사용하지 않습니다.
+3. HTTPS, 정확한 도메인 경계, 포트, 사용자정보, 리디렉션 목적지를 검사합니다.
+4. 최대 12개의 HTML·텍스트 원문을 수집합니다. 원문당 2MB, 모델에 제공하는 본문은 24,000자로 제한합니다.
+5. 수집한 본문만 별도 판정 모델 호출에 제공합니다. 지지·반박, 적용일, 대상, 예외, 정책 발표와 실제 시행을 구분하도록 지시합니다.
+6. 인용문이 실제 수집 본문에 존재하는지 코드로 검사합니다. 잘못된 인용, 근거 부족, 시점 미확인, 충돌은 확정 판정을 보류합니다.
+7. 수집 실패는 별도로 표시합니다. 검색·API 자체 오류는 사실 판정과 구분해 오류로 표시합니다.
+
+허용 목록은 `core.py`의 `DOMAINS`입니다. `.go.kr` 전체를 무조건 허용하지 않습니다. 정부 정책브리핑, 국가법령정보센터, 경제 관련 부처, 국가통계 포털 등 나열한 도메인과 그 하위 도메인만 허용합니다. 언론사, 블로그, 커뮤니티, 일반 연구기관은 제외됩니다. 기관 개편에 따른 도메인 변경은 공식 소유 여부 확인 후 목록을 수정하세요.
+
+## 한계와 개선 방향
+
+- **공식 출처 제한과 인용 일치 검사는 판단의 정확성을 보증하지 않습니다.** 문맥·법 적용·공식 작성 문서 여부·인과관계 해석에는 LLM 오류가 가능합니다. 소스 검증과 의미 판단을 구분해야 합니다.
+- PDF/HWP, 스캔, 로그인, 자바스크립트 전용 문서, iframe 안의 법령은 이 버전에서 추출하지 않습니다. 검색 결과가 있어도 본문 확보가 안 되면 불확실할 수 있습니다.
+- 검색 누락과 본문 길이 제한이 있습니다. 장문의 후반부, 과거 시행 법령, 철회된 정책을 놓칠 수 있으므로 확인되지 않은 시점은 확정하지 않도록 구성했습니다.
+- 더 엄격한 운영에는 국가법령정보 공동활용 API 연계, PDF/HWP 처리, 주장 분해, 독립적인 검토 및 사람이 정답을 붙인 평가 데이터셋이 필요합니다.
+- 모델 가용성은 계정에 따라 다릅니다. `OPENAI_MODEL`은 web_search와 구조화 출력을 지원하는 접근 가능한 모델로 설정하세요.
+- 입력 주장과 원문은 OpenAI로 전달됩니다. `store=False`로 응답 저장을 요청하지 않으며 앱 자체 DB는 없습니다. 이것이 API 제공자의 모든 운영 로그 보관을 없애는 설정은 아닙니다.
+- 비밀번호는 임시 공유용이며 사용자별 인증·전역 사용량 제한은 구현하지 않았습니다.
+
+## 검증
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+자동 테스트는 외부 도메인·위장 URL 차단, 리디렉션 차단, 인용 조작, 출처 조작, 시점/충돌/근거 부족, 검색 결과 없음 처리를 검사합니다. 실제 검색 품질 및 실제 정책 판단 정확도는 API 키를 설정한 뒤 별도 검증해야 합니다.
+
+## 공식 개발 문서
+
+- [OpenAI 웹 검색 및 도메인 제한](https://developers.openai.com/api/docs/guides/tools-web-search)
+- [OpenAI 구조화 출력](https://developers.openai.com/api/docs/guides/structured-outputs)
+- [Streamlit Community Cloud 배포](https://docs.streamlit.io/deploy/streamlit-community-cloud/deploy-your-app)
+- [Streamlit 비밀값 설정](https://docs.streamlit.io/deploy/streamlit-community-cloud/deploy-your-app/secrets-management)
+
+## 이 패키지의 확인 상태
+
+출처·인용 검증 자동 테스트 10개와 Streamlit 화면 초기 로드 및 API 키 미설정 오류 처리를 확인했습니다. 실제 API 검색·판정, GitHub 업로드 및 외부 배포는 수행하지 않았습니다. 의존성은 화면 검증에 사용한 버전으로 고정했습니다.
