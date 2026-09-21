@@ -36,6 +36,17 @@ if password:
         st.info('비밀번호를 입력하면 사용할 수 있습니다.')
         st.stop()
 
+def clear_api_key():
+    st.session_state['user_api_key'] = ''
+
+
+with st.sidebar:
+    st.subheader('OpenAI API 키')
+    key = st.text_input('API 키 입력', type='password', key='user_api_key',
+                        placeholder='sk-…').strip()
+    st.button('입력한 키 지우기', on_click=clear_api_key)
+    st.caption('키는 현재 세션에서만 사용하며 파일에 저장하지 않습니다. 요청 시 앱 서버를 거쳐 OpenAI로 전송됩니다. 입력한 키의 계정에 API 요금이 발생합니다.')
+
 with st.form('claim_form'):
     claim = st.text_area('검증할 주장', max_chars=1500, height=130,
                          placeholder='정책명, 적용 연도, 대상, 금액을 포함해 한 가지 주장으로 입력하세요.')
@@ -45,11 +56,10 @@ with st.form('claim_form'):
 
 if submitted:
     st.session_state.pop('result', None)
-    key = setting('OPENAI_API_KEY')
     if len(claim.strip()) < 10:
         st.warning('10자 이상의 구체적인 주장을 입력해 주세요.')
     elif not key:
-        st.error('운영자가 OPENAI_API_KEY를 설정해야 합니다. README의 배포 안내를 확인하세요.')
+        st.error('왼쪽 사이드바에 OpenAI API 키를 입력해 주세요.')
     elif time.time() - st.session_state.get('last_request', 0) < 30:
         st.warning('연속 요청은 30초 간격으로 가능합니다.')
     else:
@@ -60,7 +70,7 @@ if submitted:
                     st.session_state.result = check_claim(
                         client, claim.strip(), as_of.isoformat(), setting('OPENAI_MODEL', 'gpt-4.1'))
         except AuthenticationError:
-            st.error('API 인증에 실패했습니다. 운영자가 키를 확인해 주세요.')
+            st.error('API 인증에 실패했습니다. 입력한 API 키를 확인해 주세요.')
         except RateLimitError:
             st.error('API 사용 한도 또는 요청 제한에 도달했습니다. 잠시 후 다시 시도하세요.')
         except (APIError, ValueError):
