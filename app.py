@@ -5,8 +5,8 @@ import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import streamlit as st
-from openai import OpenAI, AuthenticationError, RateLimitError, APIError
-from core import check_claim, DOMAINS
+from openai import OpenAI
+from core import check_claim, DOMAINS, error_diagnostic
 
 st.set_page_config(page_title='정책 팩트체크', page_icon='🔎', layout='centered')
 
@@ -64,19 +64,26 @@ if submitted:
         st.warning('연속 요청은 30초 간격으로 가능합니다.')
     else:
         st.session_state.last_request = time.time()
+        stage = ['API 클라이언트 준비']
+        progress_label = st.empty()
+
+        def show_progress(value):
+            stage[0] = value
+            progress_label.caption('현재 단계: ' + value)
+
         try:
             with st.spinner('공식 근거 검색 → 원문 확인 → 판정 중입니다…'):
                 with OpenAI(api_key=key, timeout=90, max_retries=1) as client:
                     st.session_state.result = check_claim(
-                        client, claim.strip(), as_of.isoformat(), setting('OPENAI_MODEL', 'gpt-4.1'))
-        except AuthenticationError:
-            st.error('API 인증에 실패했습니다. 입력한 API 키를 확인해 주세요.')
-        except RateLimitError:
-            st.error('API 사용 한도 또는 요청 제한에 도달했습니다. 잠시 후 다시 시도하세요.')
-        except (APIError, ValueError):
-            st.error('검색 또는 판정 요청을 완료하지 못했습니다. 다시 시도해 주세요. 사실 판정은 생성하지 않았습니다.')
-        except Exception:
-            st.error('처리 중 오류가 발생했습니다. 설정을 확인한 뒤 다시 시도해 주세요.')
+                        client, claim.strip(), as_of.isoformat(), setting('OPENAI_MODEL', 'gpt-4.1'),
+                        on_progress=show_progress)
+        except Exception as exc:
+            message, detail = error_diagnostic(exc, stage[0])
+            st.error(message)
+            st.caption('오류 진단 · 아래 정보를 복사해 전달해 주세요. API 키는 보내지 마세요.')
+            st.json(detail)
+        finally:
+            progress_label.empty()
 
 if 'result' in st.session_state:
     r = st.session_state.result

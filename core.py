@@ -153,21 +153,74 @@ def gate(decision, pages):
 
 def candidates(response):
     found = {}
-    # 생성된 답변의 URL이 아닌 검색 도구의 출처 및 인용 메타데이터만 사용합니다.
-    for item in response.model_dump().get('output', []):
-        for source in item.get('action', {}).get('sources', []):
-            url = source.get('url', '')
-            if allowed_url(url):
-                found[url] = {'url': url, 'title': source.get('title') or url}
-        for part in item.get('content', []):
-            for ann in part.get('annotations', []):
-                url = ann.get('url', '')
-                if ann.get('type') == 'url_citation' and allowed_url(url):
-                    found[url] = {'url': url, 'title': ann.get('title') or url}
+
+    def add(source):
+        if not isinstance(source, dict):
+            return
+        url = source.get('url')
+        if isinstance(url, str) and allowed_url(url):
+            found[url] = {'url': url, 'title': source.get('title') or url}
+
+    # SDK는 누락된 선택 필드를 None으로 직렬화할 수 있습니다.
+    for item in response.model_dump().get('output') or []:
+        if not isinstance(item, dict):
+            continue
+        action = item.get('action') or {}
+        if isinstance(action, dict):
+            for source in action.get('sources') or []:
+                add(source)
+        for part in item.get('content') or []:
+            if not isinstance(part, dict):
+                continue
+            for ann in part.get('annotations') or []:
+                if isinstance(ann, dict) and ann.get('type') == 'url_citation':
+                    add(ann)
     return list(found.values())[:12]
 
 
-def check_claim(client, claim, as_of, model='gpt-4.1'):
+class ResponseFailure(Exception):
+    pass
+
+
+def ensure_complete(response):
+    data = response.model_dump()
+    if data.get('status') in ('incomplete', 'failed', 'cancelled', 'queued', 'in_progress'):
+        raise ResponseFailure('응답 미완료')
+
+
+def error_diagnostic(exc, stage):
+    # 예외 원문·요청 본문·로컬 변수는 키나 입력 내용을 포함할 수 있어 출력하지 않습니다.
+    name = type(exc).__name__
+    messages = {
+        'AuthenticationError': '입력한 API 키가 유효한지 확인해 주세요.',
+        'PermissionDeniedError': '이 API 프로젝트에 선택한 모델을 사용할 권한이 있는지 확인해 주세요.',
+        'NotFoundError': 'OPENAI_MODEL 설정과 해당 모델의 사용 가능 여부를 확인해 주세요.',
+        'RateLimitError': 'API 잔액·사용 한도·요청 제한을 확인하고 잠시 후 다시 시도해 주세요.',
+        'BadRequestError': '모델·검색 도구·구조화 출력 설정을 확인해야 합니다. app.py, core.py, requirements.txt를 함께 업데이트해 주세요.',
+        'APIConnectionError': '앱 서버에서 OpenAI에 연결하지 못했습니다. 잠시 후 다시 시도해 주세요.',
+        'APITimeoutError': 'API 응답 시간이 초과되었습니다. 주장을 짧게 나누어 다시 시도해 주세요.',
+        'ImportError': '필수 라이브러리를 불러오지 못했습니다. requirements.txt를 함께 업데이트하고 배포 환경의 의존성 설치 내역을 확인해 주세요.',
+        'ValidationError': '판정 응답이 예상 형식과 다릅니다. 다시 시도해 주세요.',
+        'LengthFinishReasonError': '판정 응답이 길이 제한으로 중단되었습니다. 주장을 한 가지로 줄여 다시 시도해 주세요.',
+        'ContentFilterFinishReasonError': 'API가 응답 생성을 제한했습니다. 검증할 정책 주장을 명확히 작성해 주세요.',
+        'ResponseFailure': 'API 응답이 완료되지 않았거나 판정 결과가 없습니다. 다시 시도해 주세요.',
+    }
+    detail = {'실패 단계': stage, '오류 유형': name}
+    status = getattr(exc, 'status_code', None)
+    if isinstance(status, int):
+        detail['HTTP 상태'] = status
+    trace = exc.__traceback__
+    while trace:
+        filename = trace.tb_frame.f_code.co_filename.replace('\\', '/').rsplit('/', 1)[-1]
+        if filename in ('app.py', 'core.py'):
+            detail['코드 위치'] = f'{filename}:{trace.tb_lineno}'
+        trace = trace.tb_next
+    return messages.get(name, '아래 오류 진단을 확인해 주세요. 이 정보로 실패 지점을 확인할 수 있습니다.'), detail
+
+
+def check_claim(client, claim, as_of, model='gpt-4.1', on_progress=None):
+    progress = on_progress or (lambda stage: None)
+    progress('공식 근거 검색')
     payload = json.dumps({'claim': claim, 'as_of': as_of}, ensure_ascii=False)
     search = client.responses.create(
         model=model, store=False, max_output_tokens=2200,
@@ -178,7 +231,10 @@ def check_claim(client, claim, as_of, model='gpt-4.1'):
                       '기준일의 법령 원문, 정부 공고, 공식 통계를 우선하고 '
                       '시행일·예외·개정 자료도 찾아라. 공식 원문 링크를 인용하라.'),
         input=payload)
+    ensure_complete(search)
+    progress('검색 출처 해석')
     urls = candidates(search)
+    progress('공식 본문 수집')
     with ThreadPoolExecutor(max_workers=4) as pool:
         results = list(pool.map(fetch_page, urls))
     pages, failures = [], []
@@ -194,14 +250,17 @@ def check_claim(client, claim, as_of, model='gpt-4.1'):
                   'scope': claim, 'evidence': [],
                   'limitations': ['검색 누락 또는 본문 수집 실패는 주장이 거짓이라는 의미가 아닙니다.']}
     else:
+        progress('LLM 판정 및 응답 해석')
         response = client.responses.parse(
             model=model, store=False, max_output_tokens=4500,
             input=[{'role': 'system', 'content': JUDGE_PROMPT},
                    {'role': 'user', 'content': json.dumps(
                        {'claim': claim, 'as_of': as_of, 'pages': pages}, ensure_ascii=False)}],
             text_format=Decision)
+        ensure_complete(response)
         if response.output_parsed is None:
-            raise ValueError('판정 결과를 읽을 수 없습니다.')
+            raise ResponseFailure('판정 결과 없음')
+        progress('인용문 검증')
         result = gate(response.output_parsed, pages)
     return {**result, 'claim': claim, 'as_of': as_of, 'model': model,
             'checked_at': datetime.now(timezone.utc).isoformat(),

@@ -15,18 +15,17 @@
 2. `policy-checker` 폴더 **안의 파일과 폴더**를 저장소 루트에 올립니다. 루트에 `app.py`, `core.py`, `requirements.txt`, `README.md`, `tests/`, `.streamlit/`, `.gitignore`가 있어야 합니다. 숨김 파일도 포함하세요.
 3. https://share.streamlit.io 에 로그인하고 GitHub 계정을 연결합니다.
 4. `Create app`에서 저장소와 브랜치(보통 `main`)를 선택하고 진입 파일을 `app.py`로 지정합니다. Python은 3.12를 선택합니다.
-5. `Advanced settings`의 `Secrets`에 다음을 입력합니다.
+5. 기본 설정으로 바로 배포할 수 있습니다. 모델 변경이나 공유 비밀번호가 필요할 때만 `Advanced settings`의 `Secrets`에 다음을 입력합니다.
 
 ```toml
-OPENAI_API_KEY = "실제_OpenAI_API_키"
 OPENAI_MODEL = "gpt-4.1"
 APP_PASSWORD = "직접_정한_공유용_비밀번호"
 ```
 
-6. `Deploy`를 누르고 생성된 앱 주소에 접속합니다. 비밀번호를 입력하고 구체적인 주장을 검증합니다.
+6. `Deploy`를 누르고 생성된 앱 주소에 접속합니다. 공유 비밀번호를 설정했다면 먼저 입력합니다. 왼쪽 사이드바에 본인의 OpenAI API 키를 입력하고 구체적인 주장을 검증합니다.
 7. 수정한 코드를 GitHub에 반영하면 연결된 앱에 배포됩니다. 운영 중 실제 근거 링크와 본문을 직접 점검하세요.
 
-`secrets.toml.example`은 예시일 뿐 자동으로 읽히지 않습니다. 실제 키가 들어 있는 `secrets.toml`은 업로드하지 마세요. 앱 운영용 API 키에 비용 한도를 설정하고 임시 공유에는 비밀번호를 사용하세요. 세션별 30초 제한은 새 세션을 막는 전체 서비스 사용량 제한은 아닙니다.
+`secrets.toml.example`은 선택 설정 예시이며 자동으로 읽히지 않습니다. API 키는 Secrets나 환경변수에서 읽지 않고 앱 화면에서만 입력받습니다. 입력값은 가려서 표시하며 현재 Streamlit 세션의 메모리에서 사용합니다. 파일·결과 JSON에 저장하지 않으며 사이드바의 버튼으로 지울 수 있습니다. 키는 앱 서버를 거쳐 OpenAI 인증에 사용되고 입력한 키의 계정에 요금이 발생합니다. 비밀번호 등 비밀값이 들어 있는 `secrets.toml`은 업로드하지 마세요. 세션별 30초 제한은 새 세션을 막는 전체 서비스 사용량 제한은 아닙니다.
 
 ## 로컬 실행
 
@@ -54,7 +53,7 @@ Windows PowerShell:
 pip install -r requirements.txt
 ```
 
-`.streamlit/secrets.toml.example`을 `.streamlit/secrets.toml`로 복사해 실제 값을 넣고 실행합니다.
+바로 실행한 뒤 앱의 왼쪽 사이드바에서 API 키를 입력합니다. 모델 변경이나 공유 비밀번호가 필요할 때만 `.streamlit/secrets.toml.example`을 `.streamlit/secrets.toml`로 복사해 수정합니다.
 
 ```bash
 streamlit run app.py
@@ -99,4 +98,12 @@ python -m unittest discover -s tests -v
 
 ## 이 패키지의 확인 상태
 
-출처·인용 검증 자동 테스트 10개와 Streamlit 화면 초기 로드 및 API 키 미설정 오류 처리를 확인했습니다. 실제 API 검색·판정, GitHub 업로드 및 외부 배포는 수행하지 않았습니다. 의존성은 화면 검증에 사용한 버전으로 고정했습니다.
+출처·인용 검증 자동 테스트 14개와 Streamlit 화면 초기 로드, API 키 입력·누락 처리 및 키 지우기 동작을 확인했습니다. 실제 API 검색·판정, GitHub 업로드 및 외부 배포는 수행하지 않았습니다. 의존성은 화면 검증에 사용한 버전으로 고정했습니다.
+
+## 오류가 반복될 때
+
+검색 응답의 `sources`가 `null`일 때 발생하던 TypeError를 수정했습니다. 출처가 비어 있어도 응답의 인용 메타데이터를 확인하며, 허용된 출처가 없으면 불확실로 처리합니다. API 응답 미완료는 사실 판정과 구분합니다.
+
+기존 앱 업데이트 시 **app.py와 core.py를 반드시 함께 교체**하세요. requirements.txt도 이 패키지와 일치시켜 주세요. 화면에 실패 단계·오류 유형·코드 위치가 표시됩니다. 문제 문의 시 이 오류 진단만 전달하고 API 키는 전달하지 마세요. 예외 원문이나 요청 본문은 화면에 출력하지 않습니다.
+
+SDK가 실제로 생성하는 null 출처 응답의 처리를 확인하고, 모의 API 오류로 화면 진단과 비밀값 비노출을 확인했습니다. 사용자의 배포 서버 및 실제 유료 API 호출은 검증하지 않았습니다.

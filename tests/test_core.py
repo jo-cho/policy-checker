@@ -1,6 +1,6 @@
 import unittest
 from unittest.mock import Mock, patch
-from core import allowed_url, SafeRedirect, Decision, gate, fetch_page, candidates, check_claim
+from core import allowed_url, SafeRedirect, Decision, gate, fetch_page, candidates, check_claim, error_diagnostic, ResponseFailure
 
 
 class EvidenceSafetyTests(unittest.TestCase):
@@ -69,6 +69,38 @@ class EvidenceSafetyTests(unittest.TestCase):
         with patch('core.build_opener') as opener:
             self.assertIsNone(fetch_page({'url': 'https://example.com'})[0])
             opener.assert_not_called()
+
+    def test_nullable_search_fields_keep_valid_citation(self):
+        response = Mock()
+        response.model_dump.return_value = {'output': [
+            {'action': {'sources': None}, 'content': None},
+            {'action': None, 'content': [{'annotations': None}]},
+            {'content': [{'annotations': [{'type': 'url_citation',
+                'url': 'https://law.go.kr/example', 'title': '법령'}]}]}]}
+        self.assertEqual(candidates(response), [{'url': 'https://law.go.kr/example', 'title': '법령'}])
+
+    def test_null_sources_pipeline(self):
+        client = Mock()
+        client.responses.create.return_value.model_dump.return_value = {
+            'status': 'completed', 'output': [{'action': {'sources': None}}]}
+        stages = []
+        result = check_claim(client, '경제정책 주장', '2025-01-01', on_progress=stages.append)
+        self.assertEqual(result['verdict'], '불확실')
+        self.assertIn('검색 출처 해석', stages)
+
+    def test_incomplete_search_is_error_not_verdict(self):
+        client = Mock()
+        client.responses.create.return_value.model_dump.return_value = {
+            'status': 'incomplete', 'output': []}
+        with self.assertRaises(ResponseFailure):
+            check_claim(client, '경제정책 주장', '2025-01-01')
+
+    def test_diagnostics_do_not_reveal_exception_payload(self):
+        exc = TypeError('sk-secret-private-key 사용자 비공개 주장')
+        message, detail = error_diagnostic(exc, '검색 출처 해석')
+        self.assertEqual(detail['오류 유형'], 'TypeError')
+        self.assertNotIn('sk-secret', str((message, detail)))
+        self.assertNotIn('비공개 주장', str((message, detail)))
 
 
 if __name__ == '__main__':
