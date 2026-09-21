@@ -164,6 +164,7 @@ if 'result' in st.session_state:
         s = sources[e['source_id']]
         with st.container(border=True):
             st.text(f"[{s['id']}] {s['title']} · {e['relationship']}")
+            st.caption('수집한 원문에서 직접 가져온 구절')
             st.text('“' + e['quote'] + '”')
             st.text(e['explanation'])
             st.caption(f"발행일: {e['publication_date']} · 적용 시점: {e['applicable_period']}")

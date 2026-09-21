@@ -1,6 +1,6 @@
 import unittest
 from unittest.mock import Mock, patch
-from core import allowed_url, SafeRedirect, Decision, gate, fetch_page, candidates, check_claim, error_diagnostic, ResponseFailure, normalize_domain, open_public_page, judgement_prompt
+from core import allowed_url, SafeRedirect, Decision, gate, fetch_page, candidates, check_claim, error_diagnostic, ResponseFailure, normalize_domain, open_public_page, judgement_prompt, SelectedDecision, prepare_passages, selection_schema, selected_gate
 
 
 class EvidenceSafetyTests(unittest.TestCase):
@@ -170,20 +170,49 @@ class EvidenceSafetyTests(unittest.TestCase):
         client.responses.create.return_value.model_dump.return_value = {'output': [
             {'type': 'web_search_call', 'action': {'sources': [{'url': 'https://law.go.kr/a'}]}}]}
         client.responses.parse.return_value.model_dump.return_value = {'status': 'completed'}
-        client.responses.parse.return_value.output_parsed = Decision(**self.data)
+        selected_data = {**self.data, 'evidence': [{**{k: v for k, v in self.data['evidence'][0].items() if k not in ('quote', 'source_id')}, 'passage_id': 'S1_P1'}]}
+        client.responses.parse.return_value.output_parsed = SelectedDecision(**selected_data)
         for mode in ['균형', '엄격']:
             with patch('core.fetch_page', return_value=(self.pages[0].copy(), None)):
                 result = check_claim(client, '경제정책 주장', '2025-01-01', judgement_mode=mode)
             self.assertEqual(result['verdict'], '참')
             self.assertEqual(result['judgement_mode'], mode)
             self.assertEqual(client.responses.parse.call_args.kwargs['input'][0]['content'], judgement_prompt(mode))
-        self.data['evidence'][0]['quote'] = '본문에 존재하지 않는 허위 인용문을 임의로 생성했다.'
-        client.responses.parse.return_value.output_parsed = Decision(**self.data)
+        selected_data['evidence'][0]['passage_id'] = 'S99_P1'
+        client.responses.parse.return_value.output_parsed = SelectedDecision(**selected_data)
         with patch('core.fetch_page', return_value=(self.pages[0].copy(), None)):
             result = check_claim(client, '경제정책 주장', '2025-01-01', judgement_mode='균형')
         self.assertEqual(result['verdict'], '불확실')
         self.assertEqual(result['decision_origin'], '시스템 검증')
         self.assertTrue(result['hold_reasons'])
+
+    def test_passage_quote_is_exact_and_schema_restricts_ids(self):
+        text = ('지원 대상은 “소상공인”이며 금액은 1,000원이다. 단, 예외 대상은 제외한다. ' * 25).strip()
+        pages = [{'id': 'S1', 'text': text, 'url': 'https://law.go.kr/a'}]
+        payload, catalog = prepare_passages(pages)
+        self.assertNotIn('text', payload[0])
+        for entry in catalog.values():
+            self.assertIn(entry['quote'], text)
+            self.assertLessEqual(len(entry['quote']), 600)
+        self.assertEqual(''.join(p['text'] for p in payload[0]['passages']), text)
+        data = {**self.data, 'evidence': [{'passage_id': 'S1_P1', 'relationship': '지지',
+               'explanation': '구절을 선택함', 'publication_date': '확인 불가', 'applicable_period': '확인 불가'}]}
+        schema = selection_schema(catalog)
+        result = selected_gate(schema(**data), catalog, pages)
+        self.assertEqual(result['verdict'], '참')
+        self.assertEqual(result['evidence'][0]['quote'], catalog['S1_P1']['quote'])
+        self.assertEqual(result['evidence'][0]['source_id'], 'S1')
+        data['evidence'][0]['passage_id'] = 'S999_P1'
+        with self.assertRaises(ValueError):
+            schema(**data)
+
+    def test_selected_passage_still_requires_correct_direction(self):
+        _, catalog = prepare_passages(self.pages)
+        data = {**self.data, 'evidence': [{'passage_id': 'S1_P1', 'relationship': '반박',
+               'explanation': '반박 자료', 'publication_date': '확인 불가', 'applicable_period': '확인 불가'}]}
+        result = selected_gate(SelectedDecision(**data), catalog, self.pages)
+        self.assertEqual(result['verdict'], '불확실')
+        self.assertTrue(any('판정 방향' in reason for reason in result['hold_reasons']))
 
 
 if __name__ == '__main__':
