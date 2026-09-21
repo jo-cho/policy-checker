@@ -1,6 +1,6 @@
 import unittest
 from unittest.mock import Mock, patch
-from core import allowed_url, SafeRedirect, Decision, gate, fetch_page, candidates, check_claim, error_diagnostic, ResponseFailure
+from core import allowed_url, SafeRedirect, Decision, gate, fetch_page, candidates, check_claim, error_diagnostic, ResponseFailure, normalize_domain, open_public_page
 
 
 class EvidenceSafetyTests(unittest.TestCase):
@@ -16,7 +16,7 @@ class EvidenceSafetyTests(unittest.TestCase):
 
     def test_domain_spoofing(self):
         for url in ['https://law.go.kr.evil.com/a', 'https://evil-law.go.kr/a',
-                    'https://law.go.kr@evil.com', 'http://law.go.kr',
+                    'https://law.go.kr@evil.com', 'file:///etc/passwd',
                     'https://law.go.kr:8443', 'https://127.0.0.1',
                     'https://law.go.kr:bad', 'https://news.example.com']:
             self.assertFalse(allowed_url(url), url)
@@ -66,7 +66,7 @@ class EvidenceSafetyTests(unittest.TestCase):
         self.assertEqual(candidates(response), [])
 
     def test_disallowed_url_never_fetched(self):
-        with patch('core.build_opener') as opener:
+        with patch('core.socket.getaddrinfo') as opener:
             self.assertIsNone(fetch_page({'url': 'https://example.com'})[0])
             opener.assert_not_called()
 
@@ -101,6 +101,69 @@ class EvidenceSafetyTests(unittest.TestCase):
         self.assertEqual(detail['오류 유형'], 'TypeError')
         self.assertNotIn('sk-secret', str((message, detail)))
         self.assertNotIn('비공개 주장', str((message, detail)))
+
+    def test_custom_domains_propagate_to_search(self):
+        client = Mock()
+        client.responses.create.return_value.model_dump.return_value = {'output': []}
+        result = check_claim(client, '경제정책 주장', '2025-01-01', domains=['customs.go.kr'])
+        self.assertEqual(client.responses.create.call_args.kwargs['tools'][0]['filters']['allowed_domains'], ['customs.go.kr'])
+        self.assertEqual(result['allowed_domains'], ['customs.go.kr'])
+        self.assertFalse(allowed_url('https://law.go.kr/a', ['customs.go.kr']))
+        self.assertTrue(allowed_url('https://www.customs.go.kr/a', ['customs.go.kr']))
+        with self.assertRaises(ValueError):
+            SafeRedirect(['customs.go.kr']).redirect_request(None, None, 302, '', {}, 'https://law.go.kr/a')
+
+    def test_empty_domains_never_trigger_search(self):
+        client = Mock()
+        with self.assertRaises(ValueError):
+            check_claim(client, '경제정책 주장', '2025-01-01', domains=[])
+        client.responses.create.assert_not_called()
+
+    def test_normalize_government_domains(self):
+        self.assertEqual(normalize_domain(' HTTPS://WWW.CUSTOMS.GO.KR/path?q=1 '), 'www.customs.go.kr')
+        for value in ['localhost', '127.0.0.1', 'host.internal', 'https://user@law.go.kr', 'https://law.go.kr:8443', '*.go.kr']:
+            with self.assertRaises(ValueError):
+                normalize_domain(value)
+
+    def test_full_web_omits_filter(self):
+        client = Mock()
+        client.responses.create.return_value.model_dump.return_value = {
+            'status': 'completed', 'output': [{'type': 'web_search_call', 'action': {'sources': None}}]}
+        result = check_claim(client, '경제정책 주장', '2025-01-01', domains=[], all_web=True)
+        self.assertEqual(client.responses.create.call_args.kwargs['tools'], [{'type': 'web_search'}])
+        self.assertEqual(result['search_scope'], '전체 웹')
+        self.assertEqual(result['web_search_calls'], 1)
+        self.assertTrue(allowed_url('https://www.reuters.com/a', all_web=True))
+        self.assertFalse(allowed_url('https://www.reuters.com/a'))
+        self.assertTrue(allowed_url('http://www.reuters.com/a', ['reuters.com']))
+        self.assertFalse(allowed_url('reuters.com', all_web=True))
+
+    def test_general_domains_and_search_metadata(self):
+        self.assertEqual(normalize_domain('https://reuters.com/a'), 'reuters.com')
+        response = Mock()
+        response.model_dump.return_value = {'output': [{'action': {'sources': [
+            {'url': 'https://reuters.com/a', 'title': '기사'}]}}]}
+        self.assertEqual(candidates(response), [])
+        self.assertEqual(len(candidates(response, all_web=True)), 1)
+
+    def test_full_web_blocks_private_network(self):
+        for address in ['127.0.0.1', '10.1.2.3', '169.254.169.254', '::1']:
+            with patch('core.socket.getaddrinfo', return_value=[(2, 1, 6, '', (address, 443))]), patch('core.http.client.HTTPSConnection') as connection:
+                with self.assertRaises(ValueError):
+                    with open_public_page('https://public.example.com', [], True):
+                        pass
+                connection.assert_not_called()
+
+    def test_full_web_redirect_rechecks_address(self):
+        redirect = Mock(status=302)
+        redirect.getheader.return_value = 'https://internal.example.com'
+        conn = Mock()
+        conn.getresponse.return_value = redirect
+        with patch('core.socket.getaddrinfo', side_effect=[[(2, 1, 6, '', ('8.8.8.8', 443))], [(2, 1, 6, '', ('10.0.0.1', 443))]]), patch('core.http.client.HTTPSConnection', return_value=conn):
+            with self.assertRaises(ValueError):
+                with open_public_page('https://public.example.com', [], True):
+                    pass
+            conn.close.assert_called_once()
 
 
 if __name__ == '__main__':
