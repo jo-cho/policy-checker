@@ -6,7 +6,8 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 import streamlit as st
 from openai import OpenAI
-from core import check_claim, DOMAINS, error_diagnostic, normalize_domain
+from pdf_support import PDFInputError
+from core import check_claim, check_documents, DOMAINS, error_diagnostic, normalize_domain
 
 st.set_page_config(page_title='정책 팩트체크', page_icon='🔎', layout='centered')
 
@@ -18,14 +19,14 @@ def setting(name, default=''):
         return os.getenv(name, default)
 
 
-st.caption('POLICY FACT CHECK · 웹 근거 검증')
+st.caption('POLICY FACT CHECK · 근거 기반 검증')
 st.title('경제정책, 근거로 확인하세요')
-st.write('주장을 입력하면 선택한 검색 범위에서 원문을 찾아 참, 거짓, 불확실로 판정합니다.')
+st.write('주장을 입력하면 선택한 근거 자료를 바탕으로 참, 거짓, 불확실로 판정합니다.')
 with st.sidebar:
     st.subheader('판정 기준')
     st.write('🟢 참: 증거로 입증됨\n\n🔴 거짓: 증거로 반박됨\n\n🟡 불확실: 충분한 증거 없음')
     st.caption('신뢰도는 LLM의 자기평가입니다. 통계적으로 검증된 정답 확률이 아닙니다.')
-    st.caption('열람 가능한 HTML·텍스트 본문만 판정에 사용합니다.')
+    st.caption('판정은 균형 기준으로 진행합니다.')
 
 password = setting('APP_PASSWORD')
 if password:
@@ -36,6 +37,10 @@ if password:
 
 def sources_changed():
     st.session_state.pop('result', None)
+    if 'active_domains' in st.session_state:
+        st.session_state.saved_domains = list(st.session_state.active_domains)
+    if 'all_web' in st.session_state:
+        st.session_state.saved_all_web = st.session_state.all_web
 
 
 def add_source():
@@ -67,28 +72,35 @@ def reset_sources():
 
 
 if 'active_domains' not in st.session_state:
-    st.session_state.active_domains = list(DOMAINS)
+    st.session_state.active_domains = list(st.session_state.get('saved_domains', DOMAINS))
+if 'domain_options' not in st.session_state:
     st.session_state.domain_options = list(DOMAINS)
+if 'all_web' not in st.session_state:
+    st.session_state.all_web = st.session_state.get('saved_all_web', False)
 
 with st.sidebar:
-    judgement_mode = st.radio('판정 방식', ['균형', '엄격'], key='judgement_mode',
-                              on_change=sources_changed, horizontal=True)
-    st.caption('균형: 핵심 사실에 충분한 직접 근거가 있으면 판정합니다. 엄격: 모든 핵심 조건과 적용 시점을 보수적으로 확인합니다.')
-    st.subheader('검색 범위')
-    all_web = st.toggle('전체 웹 검색', key='all_web', on_change=sources_changed)
-    st.caption('기본값은 정부·법령 목록입니다. 전체 웹 검색을 켜면 아래 목록 제한을 적용하지 않습니다.')
-    st.caption('선택한 주소의 ×를 누르면 제거됩니다. 하위 도메인도 포함하며, 변경은 현재 세션에만 적용됩니다.')
-    selected_domains = st.multiselect('검색에 사용할 출처',
-        options=st.session_state.domain_options, key='active_domains',
-        on_change=sources_changed, disabled=all_web)
-    st.text_input('출처 추가', placeholder='예: reuters.com', key='new_source', disabled=all_web)
-    st.button('출처 추가하기', on_click=add_source, disabled=all_web)
-    st.button('기본 목록 복원', on_click=reset_sources)
-    st.caption('언론·연구기관 등 공개 웹사이트를 추가할 수 있습니다. URL을 넣으면 도메인만 추가합니다.')
-    if st.session_state.get('source_notice'):
-        st.caption(st.session_state.source_notice)
-    if not all_web and not selected_domains:
-        st.warning('검증하려면 출처를 1개 이상 선택해 주세요.')
+    evidence_mode = st.radio('근거 자료', ['웹 검색', '업로드한 PDF만'],
+                             key='evidence_mode', on_change=sources_changed)
+
+all_web = st.session_state.get('all_web', False)
+selected_domains = st.session_state.active_domains
+if evidence_mode == '웹 검색':
+    with st.sidebar:
+        st.subheader('검색 범위')
+        all_web = st.toggle('전체 웹 검색', key='all_web', on_change=sources_changed)
+        st.caption('기본값은 정부·법령 목록입니다. 전체 웹 검색을 켜면 아래 목록 제한을 적용하지 않습니다.')
+        st.caption('선택한 주소의 ×를 누르면 제거됩니다. 하위 도메인도 포함하며, 변경은 현재 세션에만 적용됩니다.')
+        selected_domains = st.multiselect('검색에 사용할 출처',
+            options=st.session_state.domain_options, key='active_domains',
+            on_change=sources_changed, disabled=all_web)
+        st.text_input('출처 추가', placeholder='예: reuters.com', key='new_source', disabled=all_web)
+        st.button('출처 추가하기', on_click=add_source, disabled=all_web)
+        st.button('기본 목록 복원', on_click=reset_sources)
+        st.caption('언론·연구기관 등 공개 웹사이트를 추가할 수 있습니다. URL을 넣으면 도메인만 추가합니다.')
+        if st.session_state.get('source_notice'):
+            st.caption(st.session_state.source_notice)
+        if not all_web and not selected_domains:
+            st.warning('검증하려면 출처를 1개 이상 선택해 주세요.')
 
 def clear_api_key():
     st.session_state['user_api_key'] = ''
@@ -101,6 +113,13 @@ with st.sidebar:
     st.button('입력한 키 지우기', on_click=clear_api_key)
     st.caption('키는 현재 세션에서만 사용하며 파일에 저장하지 않습니다. 요청 시 앱 서버를 거쳐 OpenAI로 전송됩니다. 입력한 키의 계정에 API 요금이 발생합니다.')
 
+uploaded_files = []
+if evidence_mode == '업로드한 PDF만':
+    uploaded_files = st.file_uploader('근거 PDF 업로드', type=['pdf'], accept_multiple_files=True,
+                                      key='pdf_files', on_change=sources_changed)
+    st.caption('최대 5개 · 파일당 10MB · 합계 100쪽/추출 본문 15만 자. 스캔본은 OCR 후 올려 주세요. 웹 검색은 사용하지 않습니다.')
+    st.caption('추출한 PDF 본문과 주장이 OpenAI API로 전송됩니다. 파일을 앱의 디스크에 저장하지 않습니다.')
+
 with st.form('claim_form'):
     claim = st.text_area('검증할 주장', max_chars=1500, height=130,
                          placeholder='정책명, 적용 연도, 대상, 금액을 포함해 한 가지 주장으로 입력하세요.')
@@ -112,8 +131,10 @@ if submitted:
     st.session_state.pop('result', None)
     if len(claim.strip()) < 10:
         st.warning('10자 이상의 구체적인 주장을 입력해 주세요.')
-    elif not all_web and not selected_domains:
+    elif evidence_mode == '웹 검색' and not all_web and not selected_domains:
         st.error('허용 출처를 1개 이상 선택해 주세요.')
+    elif evidence_mode == '업로드한 PDF만' and not uploaded_files:
+        st.error('근거로 사용할 PDF를 올려 주세요.')
     elif not key:
         st.error('왼쪽 사이드바에 OpenAI API 키를 입력해 주세요.')
     elif time.time() - st.session_state.get('last_request', 0) < 30:
@@ -128,11 +149,19 @@ if submitted:
             progress_label.caption('현재 단계: ' + value)
 
         try:
-            with st.spinner('웹 근거 검색 → 원문 확인 → 판정 중입니다…'):
+            with st.spinner('근거 확인 → 원문 구절 선택 → 판정 중입니다…'):
                 with OpenAI(api_key=key, timeout=90, max_retries=1) as client:
-                    st.session_state.result = check_claim(
-                        client, claim.strip(), as_of.isoformat(), setting('OPENAI_MODEL', 'gpt-4.1'),
-                        on_progress=show_progress, domains=selected_domains, all_web=all_web, judgement_mode=judgement_mode)
+                    if evidence_mode == '웹 검색':
+                        st.session_state.result = check_claim(
+                            client, claim.strip(), as_of.isoformat(), setting('OPENAI_MODEL', 'gpt-4.1'),
+                            on_progress=show_progress, domains=selected_domains, all_web=all_web)
+                    else:
+                        st.session_state.result = check_documents(
+                            client, claim.strip(), as_of.isoformat(),
+                            [{'name': f.name, 'data': f.getvalue()} for f in uploaded_files],
+                            setting('OPENAI_MODEL', 'gpt-4.1'), on_progress=show_progress)
+        except PDFInputError as exc:
+            st.error(str(exc))
         except Exception as exc:
             message, detail = error_diagnostic(exc, stage[0])
             st.error(message)
@@ -152,7 +181,8 @@ if 'result' in st.session_state:
     st.text(r['explanation'])
     st.caption(f"판정 방식: {r.get('judgement_mode', '균형')} · 판정 경로: {r.get('decision_origin', 'LLM 판정')}")
     if r['verdict'] == '불확실':
-        st.info(f"검색 후보 {r.get('candidate_count', 0)}개 중 본문 확보 {r.get('collected_count', 0)}개. "
+        unit = 'PDF 페이지' if r.get('evidence_mode') == '업로드한 PDF만' else '검색 후보'
+        st.info(f"{unit} {r.get('candidate_count', 0)}개 중 본문 확보 {r.get('collected_count', 0)}개. "
                 '본문 확보 실패인지, 근거 내용이 부족한지 아래 설명과 수집 내역을 확인해 주세요.')
     st.caption('판정 범위: ' + r['scope'])
     st.caption(f"기준일 {r['as_of']} · 확인 시각 {r['checked_at']} · 모델 {r['model']}")
@@ -168,12 +198,15 @@ if 'result' in st.session_state:
             st.text('“' + e['quote'] + '”')
             st.text(e['explanation'])
             st.caption(f"발행일: {e['publication_date']} · 적용 시점: {e['applicable_period']}")
-            st.link_button('원문 열기', s['url'])
+            if s.get('url'):
+                st.link_button('원문 열기', s['url'])
+            else:
+                st.caption(f"PDF 출처: {s['file_name']} · 파일의 {s['page_number']}번째 페이지")
     if r['limitations']:
         st.subheader('확인되지 않은 부분')
         for item in r['limitations']:
             st.text('• ' + item)
-    with st.expander('검색 범위 및 웹 검색 실행 내역'):
+    with st.expander('근거 범위 및 웹 검색 실행 내역'):
         st.text('검색 범위: ' + r.get('search_scope', '선택한 출처'))
         st.text(f"OpenAI 웹 검색 도구 호출: {r.get('web_search_calls', 0)}회")
         if r.get('search_scope') != '전체 웹':
@@ -181,8 +214,12 @@ if 'result' in st.session_state:
     with st.expander('수집 내역'):
         st.caption('수집 성공은 해당 문서를 판정 근거로 채택했다는 의미가 아닙니다.')
         for s in r['sources']:
-            st.link_button(f"[{s['id']}] {s['title']}", s['url'])
+            if s.get('url'):
+                st.link_button(f"[{s['id']}] {s['title']}", s['url'])
+            else:
+                st.text(f"[{s['id']}] {s['title']}")
         for failure in r['collection_failures']:
-            st.text(f"{failure['url']} — {failure['reason']}")
+            target = failure.get('url') or f"{failure['file_name']} · {failure['page_number']}쪽"
+            st.text(f"{target} — {failure['reason']}")
     st.download_button('결과 JSON 내려받기', json.dumps(r, ensure_ascii=False, indent=2),
                        file_name='policy-check.json', mime='application/json')

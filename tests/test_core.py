@@ -172,16 +172,16 @@ class EvidenceSafetyTests(unittest.TestCase):
         client.responses.parse.return_value.model_dump.return_value = {'status': 'completed'}
         selected_data = {**self.data, 'evidence': [{**{k: v for k, v in self.data['evidence'][0].items() if k not in ('quote', 'source_id')}, 'passage_id': 'S1_P1'}]}
         client.responses.parse.return_value.output_parsed = SelectedDecision(**selected_data)
-        for mode in ['균형', '엄격']:
+        for mode in ['균형']:
             with patch('core.fetch_page', return_value=(self.pages[0].copy(), None)):
-                result = check_claim(client, '경제정책 주장', '2025-01-01', judgement_mode=mode)
+                result = check_claim(client, '경제정책 주장', '2025-01-01')
             self.assertEqual(result['verdict'], '참')
             self.assertEqual(result['judgement_mode'], mode)
-            self.assertEqual(client.responses.parse.call_args.kwargs['input'][0]['content'], judgement_prompt(mode))
+            self.assertEqual(client.responses.parse.call_args.kwargs['input'][0]['content'], judgement_prompt())
         selected_data['evidence'][0]['passage_id'] = 'S99_P1'
         client.responses.parse.return_value.output_parsed = SelectedDecision(**selected_data)
         with patch('core.fetch_page', return_value=(self.pages[0].copy(), None)):
-            result = check_claim(client, '경제정책 주장', '2025-01-01', judgement_mode='균형')
+            result = check_claim(client, '경제정책 주장', '2025-01-01')
         self.assertEqual(result['verdict'], '불확실')
         self.assertEqual(result['decision_origin'], '시스템 검증')
         self.assertTrue(result['hold_reasons'])
